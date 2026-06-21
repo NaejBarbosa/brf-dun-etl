@@ -1,45 +1,56 @@
-# BRF B2B - ETL de Códigos EAN & DUN 🚀
+# BRF B2B - Pipeline Completo de Dados (Web Scraping & ETL PDF) 🚀
 
-Este projeto consiste em uma solução de **ETL (Extract, Transform, Load)** desenvolvida em Python para extração de dados cadastrais (códigos de barras EAN e DUN) a partir de catálogos comerciais em formato PDF da BRF, com a posterior atualização e enriquecimento de uma base de dados local SQLite.
+Este repositório contém uma solução de engenharia de dados em duas etapas projetada para extrair, transformar e unificar o catálogo de produtos comerciais da BRF (marcas Sadia, Perdigão, Qualy, Deline, etc.).
 
-O projeto foi projetado e otimizado sob **arquitetura de recursos limitados**, visando execução suave em ambientes como **Termux ou Ubuntu sobre Android (mobile)**.
-
----
-
-## 📌 Contexto & Objetivos
-
-Muitas vezes, as bases de dados de produtos de e-commerce ou catálogos B2B possuem lacunas nos dados fiscais ou logísticos, como o **EAN-13** (código do produto para o consumidor) ou o **DUN-14** (código da caixa de embarque/distribuição).
-
-Este script automatiza:
-1. **Extração:** Leitura e processamento de documentos PDF comerciais da BRF página por página.
-2. **Transformação:** Limpeza dos dados, validação estrita de integridade estrutural (tamanhos de dígitos) e pareamento por SKU.
-3. **Carga:** Gravação das colunas ausentes (`ean` e `dun`) na base SQLite `brf_produtos_b2b.db`, otimizando a vida útil de memórias flash (I/O) e bateria do dispositivo móvel.
+A solução foi projetada e otimizada sob **arquitetura de recursos limitados**, visando uma execução fluida e resiliente a falhas de rede em ambientes móveis como **Termux ou Ubuntu sobre Android (mobile)**.
 
 ---
 
-## ⚙️ Características de Arquitetura (Otimizações Mobile)
+## 📐 Visão Geral do Pipeline de Dados
 
-* **Leitura Otimizada de PDF (PyMuPDF):** Utiliza a biblioteca `fitz` (PyMuPDF), que é significativamente mais leve e rápida do que alternativas baseadas em Python puro, reduzindo o uso de CPU e RAM.
-* **Processamento sob Demanda (Lazy Loading):** As páginas são carregadas na memória individualmente. Variáveis temporárias de texto e objetos de página são limpos de forma agressiva no final de cada loop e o coletor de lixo do Python (`gc.collect()`) é chamado a cada iteração para evitar vazamento de memória.
-* **Extração Híbrida Inteligente:** 
-  1. Primeiro tenta usar a detecção e extração de tabelas nativa do PyMuPDF (ideal para layouts tabulares e em grade do catálogo da BRF).
-  2. Caso a página não possua tabelas ou a extração falhe, aciona um mecanismo de fallback baseado em máquina de estados e Regex no texto linear da página.
-* **Otimização Estrita de Gravação (I/O e Bateria):** O script lê o banco de dados antes de efetuar qualquer escrita e apenas dispara queries de `UPDATE` se os campos `ean` ou `dun` estiverem de fato em branco. Isso minimiza escritas físicas na memória flash do celular.
-* **Commits por Página (Atomicidade):** Salva as alterações a cada página processada para evitar perdas de dados em caso de interrupções (como falta de bateria) e liberar travas do banco SQLite rapidamente.
+O fluxo é integrado em cima de um único banco de dados local SQLite e está dividido em duas etapas complementares:
+
+```mermaid
+graph TD
+    A[Sitemap XML da BRF] -->|Etapa 1: scraper.py| B(Fila de URLs no SQLite)
+    B -->|Requisições HTTP BS4| C[(Banco SQLite brf_produtos_b2b.db)]
+    D[Catálogo Comercial PDF] -->|Etapa 2: atualizar_ean.py| E[Extração Híbrida PyMuPDF]
+    E -->|Enriquecimento de EAN & DUN| C
+```
 
 ---
 
-## 🗄️ Estrutura do Banco de Dados
+## 🛠️ Detalhes das Etapas
 
-A tabela principal atualizada pelo processo é a tabela `produtos`, contendo o seguinte esquema:
+### 🔹 Etapa 1: Web Scraping do Portal (`scraper.py`)
+Esta etapa é responsável pela colheita inicial dos dados dos produtos diretamente do portal oficial B2B da BRF.
+* **Fila de Execução com Resume State:** Lê o sitemap XML (`centralmbrf.com.br/sitemap-product-1.xml`) e cria uma fila de URLs no banco SQLite. Se o script cair (por falta de bateria ou rede), ao ser reiniciado ele **retoma exatamente de onde parou**, evitando requisições duplicadas.
+* **Resiliência a Quedas de Rede (Wait & Retry):** Implementa um sistema persistente que detecta perda de sinal de internet, aguarda o reestabelecimento e tenta novamente sem abortar a execução.
+* **Parsing com BeautifulSoup & Regras Heurísticas:** Faz o parse do HTML estruturado extraindo pesos, temperaturas, marcas, e infere de forma lógica e heurística a classe/categoria do produto e suas condições de conservação com base em palavras-chave.
+* **Banco Unificado SQLite:** Grava as informações iniciais, criando o esqueleto dos registros contendo o SKU como chave primária.
+
+---
+
+### 🔹 Etapa 2: ETL e Enriquecimento do Catálogo PDF (`atualizar_ean.py`)
+Muitas vezes, os portais web não exibem códigos de barras logísticos específicos. Esta etapa lê o catálogo comercial em PDF da BRF para enriquecer os registros existentes na base com códigos de barras **EAN-13** (consumidor) e **DUN-14** (caixas/distribuição).
+* **Leitura Otimizada (PyMuPDF):** Processamento leve e rápido ideal para Termux. As páginas são abertas individualmente sob demanda, e o coletor de lixo do Python (`gc.collect()`) é invocado no encerramento de cada página para liberar RAM.
+* **Extração Híbrida Inteligente:** Tenta realizar o parse utilizando o extrator de tabelas estruturadas do PyMuPDF (completamente imune a descolamento de texto corrido em layouts de grid). Caso a página não possua tabelas detectáveis, recorre a uma máquina de estados linear baseada em Regex no texto corrido.
+* **Minimização de I/O em Disco:** Consulta o banco de dados e apenas efetua a gravação de `UPDATE` se os campos de destino no SQLite estiverem vazios (`ean IS NULL OR ean = ''` / `dun IS NULL OR dun = ''`), poupando hardware móvel.
+* **Validação Estrita:** Ignora desvios de digitação do catálogo (EANs e DUNs devem conter apenas dígitos e possuir exatamente 13 e 14 caracteres respectivamente para serem homologados).
+
+---
+
+## 🗄️ Estrutura do Banco de Dados SQLite
+
+Ambas as etapas escrevem no banco de dados SQLite `brf_produtos_b2b.db` na tabela `produtos`:
 
 ```sql
 CREATE TABLE produtos (
     sku TEXT PRIMARY KEY,
     title TEXT,
     descrFiscal TEXT,
-    ean TEXT,       -- Código de 13 dígitos (Consumidor)
-    dun TEXT,       -- Código de 14 dígitos (Distribuição/Caixa)
+    ean TEXT,       -- Código EAN-13 (Consumidor)
+    dun TEXT,       -- Código DUN-14 (Distribuição/Caixa)
     marca TEXT,
     classe TEXT,
     conservacao TEXT,
@@ -56,54 +67,38 @@ CREATE TABLE produtos (
 
 ## 🚀 Como Configurar e Executar
 
-### 1. Pré-requisitos
-Certifique-se de ter o Python 3 instalado no seu ambiente (Ubuntu/Termux) e instale o PyMuPDF:
-
+### 1. Instalar as Dependências no Ubuntu/Termux
 ```bash
-# Instalação das dependências necessárias no Ubuntu/Debian
 apt-get update && apt-get install -y python3-pip python3-fitz
+pip3 install beautifulsoup4 requests
 ```
 
-### 2. Estrutura de Diretórios
-O projeto espera que os arquivos de dados estejam localizados no seguinte layout:
-
+### 2. Estrutura de Arquivos Recomendada
 ```text
 ~/scraping/brf-dun/
-├── atualizar_ean.py         # Script ETL de execução
+├── scraper.py               # Script da Etapa 1 (Web Scraping)
+├── atualizar_ean.py         # Script da Etapa 2 (ETL do PDF)
 ├── catalogo_brf.pdf         # Catálogo comercial PDF da BRF
-└── brf_produtos_b2b.db      # Banco de dados SQLite populado
+└── brf_produtos_b2b.db      # Banco de dados SQLite unificado
 ```
 
-### 3. Execução do Script
-Para iniciar o pipeline de extração e gravação, execute:
+### 3. Rodar a Etapa 1 (Web Scraping)
+Para popular a base de dados SQLite inicial do zero:
+```bash
+python3 scraper.py
+```
 
+### 4. Rodar a Etapa 2 (ETL / Enriquecimento)
+Para ler o arquivo PDF e preencher os dados ausentes de EAN e DUN de forma segura:
 ```bash
 python3 atualizar_ean.py
 ```
 
-### 4. Formato do Log de Progresso (Terminal)
-Durante o processamento, o script emitirá atualizações imediatas a cada página concluída:
-
-```text
-Conectando ao banco de dados: /root/scraping/brf-dun/brf_produtos_b2b.db
-Abrindo catálogo PDF: /root/scraping/brf-dun/catalogo_brf.pdf
-Catálogo possui 68 página(s). Iniciando processamento...
-Página 1: 0 itens encontrados. 0 atualizados na base de dados.
-Página 2: 0 itens encontrados. 0 atualizados na base de dados.
-...
-Página 5: 10 itens encontrados. 9 atualizados na base de dados.
-Página 6: 8 itens encontrados. 8 atualizados na base de dados.
-------------------------------------------------------------
-Processamento concluído com sucesso!
-Total de itens estruturalmente processados no PDF: 488
-Total de registros atualizados (EAN e/ou DUN adicionados) no SQLite: 444
-```
-
 ---
 
-## 🛠️ Autores e Licença
+## 🛠️ Contribuição e Licença
 
-Desenvolvido para automatização de processos logísticos e ETL comerciais.
+Desenvolvido para pipeline de engenharia de dados estruturados B2B.
 
 * **Desenvolvedor:** NaejBarbosa
 * **Licença:** MIT
