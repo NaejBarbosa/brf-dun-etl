@@ -1,0 +1,21 @@
+# SQLite e bases de dados
+*.db
+*.sqlite3
+
+# Arquivos de dados pesados ou temporários
+*.json
+*.csv
+*.pdf
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+
+# Ambientes virtuais
+.venv/
+venv/
+ENV/
+env/
