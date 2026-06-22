@@ -1,0 +1,14 @@
+{
+  "name": "processador-imagens-brf",
+  "version": "1.0.0",
+  "description": "Script de preparação e processamento em lote de imagens do catálogo BRF (Sadia e Perdigão) para uso offline",
+  "main": "process_images_brf.js",
+  "scripts": {
+    "start": "node process_images_brf.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "sharp": "^0.33.4"
+  },
+  "private": true
+}
