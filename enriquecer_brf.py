@@ -146,19 +146,47 @@ def process_centralbrf_page(url):
             
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # Procura por tag img contendo 'blob.core.windows.net' e 'centralbrf' no src
+        # 1. Procura por tag img contendo 'blob.core.windows.net' e 'centralbrf' no src
         img_tag = soup.find('img', src=lambda x: x and 'blob.core.windows.net' in x and 'centralbrf' in x)
         if img_tag:
             return img_tag.get('src')
             
+        # 2. Procura pela tag img principal do produto pelo alt contendo "Clique para expandir a imagem"
+        img_tag_alt = soup.find('img', alt=lambda x: x and 'Clique para expandir a imagem' in x)
+        if img_tag_alt:
+            src = img_tag_alt.get('src')
+            if src:
+                if src.startswith('http'):
+                    # Trata escapes e amp
+                    src_clean = src.replace('&amp;', '&').replace('\\u003d', '=').replace('\\u0026', '&')
+                    return src_clean
+                elif src.startswith('/'):
+                    # Link relativo (CMS Salesforce)
+                    return f"https://centralmbrf.com.br{src}"
+                    
+        # 3. Procura por tag img contendo 'salesforce.com' e 'ImageServer' no src
+        img_tag_sf = soup.find('img', src=lambda x: x and 'salesforce.com' in x and 'ImageServer' in x)
+        if img_tag_sf:
+            src = img_tag_sf.get('src')
+            if src:
+                src_clean = src.replace('&amp;', '&').replace('\\u003d', '=').replace('\\u0026', '&')
+                return src_clean
+            
         # Fallback: procura via regex no texto se nao achou a tag de imagem renderizada
-        matches = re.findall(r'(https://[^\s\"\']+(?:blob|core\.windows\.net|centralbrf)[^\s\"\']*)', res.text)
+        # Procurar tanto padrão blob/core.windows.net/centralbrf quanto salesforce.com/ImageServer
+        matches = re.findall(r'(https://[^\s\"\']+(?:blob|core\.windows\.net|centralbrf|salesforce\.com[^\s\"\']*ImageServer)[^\s\"\']*)', res.text)
         if matches:
-            # Filtra links com asterisco ou sem extensão típica de imagem
-            valid_matches = [m for m in matches if '*' not in m and any(ext in m.lower() for ext in ['.webp', '.png', '.jpg', '.jpeg'])]
-            if valid_matches:
-                webp_matches = [m for m in valid_matches if m.endswith('.webp')]
-                return webp_matches[0] if webp_matches else valid_matches[0]
+            # Filtra links com asterisco
+            valid_matches = [m for m in matches if '*' not in m]
+            cleaned_matches = []
+            for m in valid_matches:
+                m_clean = m.replace('&amp;', '&').replace('\\u003d', '=').replace('\\u0026', '&')
+                # Valida se tem extensão típica de imagem ou se é o ImageServer
+                if any(ext in m_clean.lower() for ext in ['.webp', '.png', '.jpg', '.jpeg']) or 'ImageServer' in m_clean:
+                    cleaned_matches.append(m_clean)
+            if cleaned_matches:
+                webp_matches = [m for m in cleaned_matches if m.endswith('.webp')]
+                return webp_matches[0] if webp_matches else cleaned_matches[0]
             
         return None
     except Exception as e:
