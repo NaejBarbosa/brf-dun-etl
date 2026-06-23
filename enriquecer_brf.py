@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 Nome: enriquecer_brf.py
-Descrição: Script para extrair produtos e URLs de imagens dos sites oficiais
-           Sadia e Perdigão, enriquecer o banco de dados SQLite brf_produtos_b2b.db,
-           e cadastrar novos produtos inexistentes.
+Descrição: Script para extrair produtos e URLs corretas de imagens dos sites oficiais
+           Sadia e Perdigão (ou da Central BRF como fallback), enriquecer o banco 
+           SQLite brf_produtos_b2b.db, e cadastrar novos produtos.
 Autor: Antigravity - Engenheiro de Dados Sênior
 """
 
@@ -15,6 +15,7 @@ import time
 import sqlite3
 import requests
 from bs4 import BeautifulSoup
+import json
 
 DB_PATH = '/root/scraping/brf-dun/brf_produtos_b2b.db'
 SADIA_SITEMAP = 'https://www.sadia.com.br/sitemap.xml'
@@ -89,10 +90,24 @@ def process_product_page(url, marca):
         title = re.sub(r'\s*-\s*(Sadia|Perdigão)\s*$', '', title, flags=re.IGNORECASE)
         title = clean_text(title)
         
-        # 2. Imagem do Produto
-        og_image = soup.find('meta', property='og:image')
-        image_url = og_image['content'] if og_image else ""
-        
+        # 2. Imagem do Produto (Captura a imagem real do produto)
+        image_url = ""
+        if "sadia.com.br" in url:
+            # Procura por tag img que contem '/products/' no src
+            img_tag = soup.find('img', src=lambda x: x and '/products/' in x)
+            if img_tag:
+                image_url = img_tag.get('src')
+        elif "perdigao.com.br" in url:
+            # Procura por tag img que contem 'imagem do produto:' no alt
+            img_tag = soup.find('img', alt=lambda x: x and 'imagem do produto:' in x.lower())
+            if img_tag:
+                image_url = img_tag.get('src')
+                
+        # Se nao encontrou a imagem do produto pelos padroes refinados, usa o og:image como fallback
+        if not image_url:
+            og_image = soup.find('meta', property='og:image')
+            image_url = og_image['content'] if og_image else ""
+            
         # 3. EAN (Procura números de 13 dígitos no HTML que comecem com 789)
         eans = re.findall(r'\b789\d{10}\b', res.text)
         ean = eans[0] if eans else ""
@@ -111,6 +126,34 @@ def process_product_page(url, marca):
         print(f"  [!] Erro ao processar a página {url}: {e}")
         return None
 
+def process_centralbrf_page(url):
+    """Acessa a página do produto no portal Central BRF com User-Agent do Googlebot e extrai a imagem."""
+    try:
+        headers_bot = {
+            'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
+        }
+        res = requests.get(url, headers=headers_bot, timeout=15)
+        if res.status_code != 200:
+            return None
+            
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # Procura por tag img contendo 'blob.core.windows.net' e 'centralbrf' no src
+        img_tag = soup.find('img', src=lambda x: x and 'blob.core.windows.net' in x and 'centralbrf' in x)
+        if img_tag:
+            return img_tag.get('src')
+            
+        # Fallback: procura via regex no texto se nao achou a tag de imagem renderizada
+        matches = re.findall(r'(https://[^\s\"\']+(?:blob|core\.windows\.net|centralbrf)[^\s\"\']*)', res.text)
+        if matches:
+            webp_matches = [m for m in matches if m.endswith('.webp')]
+            return webp_matches[0] if webp_matches else matches[0]
+            
+        return None
+    except Exception as e:
+        print(f"  [!] Erro ao processar página Central BRF {url}: {e}")
+        return None
+
 def main():
     if not os.path.exists(DB_PATH):
         print(f"[!] Banco de dados SQLite não encontrado no caminho: {DB_PATH}")
@@ -118,13 +161,23 @@ def main():
         
     init_db()
     
+    # 0. Limpa as imagens antigas/erradas para repovoar o banco do zero
+    print("[*] Esvaziando as URLs de imagens antigas da tabela 'produtos' no banco...")
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE produtos SET image_url = NULL")
+    conn.commit()
+    conn.close()
+    print("[+] Coluna 'image_url' limpa com sucesso no banco de dados.")
+    
+    # 1. Scraping dos sites oficiais Sadia e Perdigão
     sadia_urls = get_product_urls(SADIA_SITEMAP, "Sadia")
     perdigao_urls = get_product_urls(PERDIGAO_SITEMAP, "Perdigão")
     
     all_tasks = [(url, "Sadia") for url in sadia_urls] + [(url, "Perdigão") for url in perdigao_urls]
     total_tasks = len(all_tasks)
     
-    print(f"\n[*] Total de {total_tasks} URLs para rastreamento e enriquecimento.")
+    print(f"\n[*] Total de {total_tasks} URLs para rastreamento e enriquecimento (Sadia/Perdigão).")
     print("=============================================================")
     print("Iniciando scraping das páginas oficiais Sadia/Perdigão...")
     print("=============================================================\n")
@@ -157,7 +210,6 @@ def main():
             rows = cursor.fetchall()
             
             if rows:
-                # O EAN já existe no banco. Atualiza a URL da imagem de todos os SKUs que usam esse EAN
                 for sku, db_title in rows:
                     cursor.execute("""
                         UPDATE produtos 
@@ -168,7 +220,7 @@ def main():
                 updated_existing += 1
                 continue
                 
-        # 2. Se o EAN não existe no banco (ou não foi extraído), tentamos buscar pelo título
+        # 2. Se o EAN não existe, busca pelo título
         cursor.execute("SELECT sku FROM produtos WHERE title = ?", (title,))
         row_title = cursor.fetchone()
         if row_title:
@@ -178,22 +230,18 @@ def main():
             updated_existing += 1
             continue
             
-        # 3. Se for um produto novo (EAN e Título não constam no banco), nós o cadastramos
-        # Gera um SKU sequencial baseado no EAN ou um hash estável do título
+        # 3. Insere produto novo institucional
         if ean:
             sku_novo = f"INST_{ean}"
         else:
             sku_novo = f"INST_H_{str(hash(title) & 0xffffffff)}"
             
-        # Garante que o SKU seja único no banco
         cursor.execute("SELECT sku FROM produtos WHERE sku = ?", (sku_novo,))
         if cursor.fetchone():
-            # SKU já cadastrado anteriormente, atualiza
             cursor.execute("UPDATE produtos SET image_url = ?, url = ? WHERE sku = ?", (image_url, url, sku_novo))
             conn.commit()
             updated_existing += 1
         else:
-            # Insere novo produto institucional
             cursor.execute("""
                 INSERT INTO produtos (
                     sku, title, descrFiscal, ean, dun, marca, classe, conservacao, tempMin, tempMax, pesoLiquido, pesoBruto, vidaUtil, url, image_url
@@ -204,9 +252,54 @@ def main():
             conn.commit()
             inserted_new += 1
             
-        time.sleep(0.5) # Delay de cortesia para evitar sobrecarregar os servidores
+        time.sleep(0.5)
         
-    # Exporta os dados com imagens para JSON para que o pipeline Node.js processe as imagens
+    print(f"\n\n[+] Fim da etapa Sadia/Perdigão. Sucessos: {updated_existing + inserted_new} itens.")
+    print("=============================================================")
+    print("Iniciando busca no portal Central BRF para itens pendentes...")
+    print("=============================================================\n")
+    
+    # 2. Buscar no portal Central BRF os produtos que continuam sem imagem
+    cursor.execute("""
+        SELECT sku, url, title 
+        FROM produtos 
+        WHERE (image_url IS NULL OR image_url = '' OR image_url = 'N/A')
+          AND url LIKE 'https://centralmbrf.com.br/product/%'
+    """)
+    pending_central = cursor.fetchall()
+    total_pending_central = len(pending_central)
+    print(f"[*] Total de produtos sem imagem pendentes da Central BRF: {total_pending_central}")
+    
+    central_success = 0
+    central_fail = 0
+    central_processed = 0
+    
+    for sku, product_url, title in pending_central:
+        central_processed += 1
+        sys.stdout.write(f"\rProcessando Central BRF [{central_processed}/{total_pending_central}] | Sucessos: {central_success}...")
+        sys.stdout.flush()
+        
+        img_url_central = process_centralbrf_page(product_url)
+        if img_url_central:
+            cursor.execute("""
+                UPDATE produtos 
+                SET image_url = ? 
+                WHERE sku = ?
+            """, (img_url_central, sku))
+            conn.commit()
+            central_success += 1
+        else:
+            cursor.execute("""
+                UPDATE produtos 
+                SET image_url = 'N/A' 
+                WHERE sku = ?
+            """, (sku,))
+            conn.commit()
+            central_fail += 1
+            
+        time.sleep(0.5)
+        
+    # 3. Exporta os dados para o JSON do pipeline Node.js
     cursor.execute("""
         SELECT sku, ean, dun, image_url 
         FROM produtos 
@@ -216,37 +309,37 @@ def main():
     """)
     export_rows = cursor.fetchall()
     export_data = []
-    for sku, ean, dun, image_url in export_rows:
-        # Garante a limpeza de aspas e escolhe o código de barras
-        sku = str(sku).strip('\'\"')
-        ean = str(ean).strip('\'\"') if ean else ''
-        dun = str(dun).strip('\'\"') if dun else ''
-        image_url = str(image_url).strip('\'\"')
+    for sku_exp, ean_exp, dun_exp, img_exp in export_rows:
+        sku_exp = str(sku_exp).strip('\'\"')
+        ean_exp = str(ean_exp).strip('\'\"') if ean_exp else ''
+        dun_exp = str(dun_exp).strip('\'\"') if dun_exp else ''
+        img_exp = str(img_exp).strip('\'\"')
         
-        barcode = ean if (ean and ean != 'N/A') else dun
+        barcode = ean_exp if (ean_exp and ean_exp != 'N/A') else dun_exp
         if not barcode or barcode == 'N/A':
             continue
             
         export_data.append({
-            'sku': sku,
+            'sku': sku_exp,
             'barcode': barcode,
-            'image_url': image_url
+            'image_url': img_exp
         })
         
     json_path = '/root/scraping/brf-dun/dados_produtos_brf.json'
-    import json
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(export_data, f, ensure_ascii=False, indent=2)
-    print(f"[INFO] Dados exportados para o pipeline Node.js ({len(export_data)} itens) em: {json_path}")
+    print(f"\n[INFO] Dados exportados para o pipeline Node.js ({len(export_data)} itens) em: {json_path}")
     
     conn.close()
     
     print("\n\n=============================================================")
-    print("Enriquecimento Concluído!")
-    print(f"Total de páginas analisadas: {processed}")
-    print(f"Produtos B2B existentes enriquecidos com imagens: {updated_existing}")
-    print(f"Novos produtos cadastrados no banco: {inserted_new}")
-    print(f"Páginas sem correspondência ou com falha: {failed_or_skipped}")
+    print("Processo de Enriquecimento BRF Finalizado com Sucesso!")
+    print(f"Total Sadia/Perdigão Rastreados: {processed}")
+    print(f"  - Atualizados: {updated_existing}")
+    print(f"  - Novos cadastrados: {inserted_new}")
+    print(f"Total Central BRF Processados: {central_processed}")
+    print(f"  - Imagens vinculadas: {central_success}")
+    print(f"  - Falhas/Sem Imagem: {central_fail}")
     print("=============================================================\n")
 
 if __name__ == '__main__':
