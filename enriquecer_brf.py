@@ -98,10 +98,18 @@ def process_product_page(url, marca):
             if img_tag:
                 image_url = img_tag.get('src')
         elif "perdigao.com.br" in url:
-            # Procura por tag img que contem 'imagem do produto:' no alt
-            img_tag = soup.find('img', alt=lambda x: x and 'imagem do produto:' in x.lower())
-            if img_tag:
-                image_url = img_tag.get('src')
+            # Procura primeiro a imagem oficial do produto dentro do figure.product-pack
+            figure_tag = soup.find('figure', class_='product-pack')
+            if figure_tag:
+                img_tag = figure_tag.find('img')
+                if img_tag:
+                    image_url = img_tag.get('src')
+            
+            # Se nao encontrou, tenta por alt que contem 'imagem do produto:'
+            if not image_url:
+                img_tag = soup.find('img', alt=lambda x: x and 'imagem do produto:' in x.lower())
+                if img_tag:
+                    image_url = img_tag.get('src')
                 
         # Se nao encontrou a imagem do produto pelos padroes refinados, usa o og:image como fallback
         if not image_url:
