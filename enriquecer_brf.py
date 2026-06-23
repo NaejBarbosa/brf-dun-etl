@@ -154,8 +154,11 @@ def process_centralbrf_page(url):
         # Fallback: procura via regex no texto se nao achou a tag de imagem renderizada
         matches = re.findall(r'(https://[^\s\"\']+(?:blob|core\.windows\.net|centralbrf)[^\s\"\']*)', res.text)
         if matches:
-            webp_matches = [m for m in matches if m.endswith('.webp')]
-            return webp_matches[0] if webp_matches else matches[0]
+            # Filtra links com asterisco ou sem extensão típica de imagem
+            valid_matches = [m for m in matches if '*' not in m and any(ext in m.lower() for ext in ['.webp', '.png', '.jpg', '.jpeg'])]
+            if valid_matches:
+                webp_matches = [m for m in valid_matches if m.endswith('.webp')]
+                return webp_matches[0] if webp_matches else valid_matches[0]
             
         return None
     except Exception as e:
@@ -269,9 +272,9 @@ def main():
     
     # 2. Buscar no portal Central BRF os produtos que continuam sem imagem
     cursor.execute("""
-        SELECT sku, url, title 
+        SELECT sku, url, title, ean, dun 
         FROM produtos 
-        WHERE (image_url IS NULL OR image_url = '' OR image_url = 'N/A')
+        WHERE (image_url IS NULL OR image_url = '' OR image_url = 'N/A' OR image_url LIKE '%brfsacoeintgrcprd%')
           AND url LIKE 'https://centralmbrf.com.br/product/%'
     """)
     pending_central = cursor.fetchall()
@@ -282,12 +285,30 @@ def main():
     central_fail = 0
     central_processed = 0
     
-    for sku, product_url, title in pending_central:
+    for sku, product_url, title, ean, dun in pending_central:
         central_processed += 1
         sys.stdout.write(f"\rProcessando Central BRF [{central_processed}/{total_pending_central}] | Sucessos: {central_success}...")
         sys.stdout.flush()
         
         img_url_central = process_centralbrf_page(product_url)
+        
+        # Se a imagem for invalida (CSP com asterisco ou host antigo), limpamos ela
+        if img_url_central and ('*' in img_url_central or 'brfsacoeintgrcprd' in img_url_central):
+            img_url_central = None
+            
+        # Fallback de Produção B2B (tenta obter a URL previsivel do blob ativo se tiver EAN/DUN)
+        if not img_url_central:
+            barcode = ean or dun
+            if barcode and barcode != 'N/A':
+                barcode_clean = str(barcode).strip('\'\"')
+                potential_url = f"https://brfsaprodutosprd.blob.core.windows.net/centralbrf/B2B_Product_Photos/{barcode_clean}_1_1_1000_72_RGB.webp"
+                try:
+                    head_res = requests.head(potential_url, headers=HEADERS, timeout=5)
+                    if head_res.status_code == 200:
+                        img_url_central = potential_url
+                except Exception:
+                    pass
+        
         if img_url_central:
             cursor.execute("""
                 UPDATE produtos 
