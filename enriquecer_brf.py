@@ -17,7 +17,7 @@ import requests
 from bs4 import BeautifulSoup
 import json
 
-DB_PATH = '/root/scraping/brf-dun/brf_produtos_b2b.db'
+DB_PATH = '/root/projetos-scraping/scraping-brf/brf-dun/brf_produtos_b2b.db'
 SADIA_SITEMAP = 'https://www.sadia.com.br/sitemap.xml'
 PERDIGAO_SITEMAP = 'https://www.perdigao.com.br/sitemap.xml'
 HEADERS = {
@@ -382,7 +382,7 @@ def main():
             'image_url': img_exp
         })
         
-    json_path = '/root/scraping/brf-dun/dados_produtos_brf.json'
+    json_path = '/root/projetos-scraping/scraping-brf/brf-dun/dados_produtos_brf.json'
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(export_data, f, ensure_ascii=False, indent=2)
     print(f"\n[INFO] Dados exportados para o pipeline Node.js ({len(export_data)} itens) em: {json_path}")

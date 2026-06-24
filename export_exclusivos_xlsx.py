@@ -11,7 +11,7 @@ import sqlite3
 import subprocess
 from openpyxl import Workbook
 
-DB_PATH = '/root/scraping/brf-dun/brf_produtos_b2b.db'
+DB_PATH = '/root/projetos-scraping/scraping-brf/brf-dun/brf_produtos_b2b.db'
 DOWNLOAD_DIR = '/sdcard/Download'
 FILENAME = 'brf_produtos_exclusivos.xlsx'
 OUTPUT_PATH = os.path.join(DOWNLOAD_DIR, FILENAME)
